@@ -135,8 +135,13 @@ def handle_request(listen_reader, listen_writer):
     remote_peer = listen_writer.transport.get_extra_info('peername')
     logging.debug('query from %s:%d forwarding to redsocks' % remote_peer)
     loop = asyncio.get_event_loop()
-    send_reader, send_writer = yield from asyncio.open_connection(
-        redsocks_addr[0], redsocks_addr[1], loop=loop)
+    try:
+        send_reader, send_writer = yield from asyncio.open_connection(
+            redsocks_addr[0], redsocks_addr[1], loop=loop)
+    except ConnectionRefusedError:
+        logging.error('redsocks refused our connection')
+        listen_writer.close()
+        return
     task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
     task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
     while True:
