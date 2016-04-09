@@ -23,6 +23,8 @@ IFF_TUN = 0x0001
 IFF_NO_PI = 0x1000
 TUNSETOWNER = TUNSETIFF + 2
 nat_table = {}
+fake_src_ip = '10.45.39.3'
+listen_ip = TUN_IP
 listen_port = 39999
 redsocks_addr = ('127.0.0.1', 8123)
 
@@ -110,28 +112,22 @@ def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
     return fix_checksum(new_packet, bytes_src_ip, bytes_dst_ip)
 
 
-@asyncio.coroutine
-def process_packet(tun, packet):
-    global nat_table
-    listen_ip = TUN_IP
-    src_ip, src_port, dst_ip, dst_port = parse_tcp_packet(packet)
-    logging.debug('%s:%s -> %s:%s' % (src_ip, src_port, dst_ip, dst_port))
-    if src_ip == listen_ip and src_port == listen_port:
-        new_src_ip, new_src_port = nat_table[dst_ip + ':' + dst_port].split(':')
-        new_packet = mangle_packet(packet, new_src_ip, new_src_port, dst_ip, dst_port)
-    else:
-        nat_table[src_ip + ':' + src_port] = dst_ip + ':' + dst_port
-        new_packet = mangle_packet(packet, src_ip, src_port, listen_ip, listen_port)
-    tun.write(new_packet)
-
-
 def handle_tun_read(tun):
+    global nat_table
     packet = tun.read(MTU)
     if packet[9:10] != b'\x06':
         logging.debug('non TCP packet received, dropping')
         return
-    loop = asyncio.get_event_loop()
-    asyncio.ensure_future(process_packet(tun, packet), loop=loop)
+    src_ip, src_port, dst_ip, dst_port = parse_tcp_packet(packet)
+    logging.debug('%s:%s -> %s:%s' % (src_ip, src_port, dst_ip, dst_port))
+    if src_ip == listen_ip and src_port == str(listen_port):
+        new_src_ip, new_src_port = nat_table[dst_ip + ':' + dst_port][1:]
+        new_dst_ip = nat_table[dst_ip + ':' + dst_port][0]
+        new_packet = mangle_packet(packet, new_src_ip, new_src_port, new_dst_ip, dst_port)
+    else:
+        nat_table[fake_src_ip + ':' + src_port] = (src_ip, dst_ip, dst_port)
+        new_packet = mangle_packet(packet, fake_src_ip, src_port, listen_ip, listen_port)
+    tun.write(new_packet)
 
 
 @asyncio.coroutine
@@ -186,7 +182,7 @@ def main():
         tun = create_tun()
         switch_user(tun)
         loop = asyncio.get_event_loop()
-        listen_coro = asyncio.start_server(handle_request, TUN_IP, listen_port, loop=loop)
+        listen_coro = asyncio.start_server(handle_request, listen_ip, listen_port, loop=loop)
         loop.run_until_complete(listen_coro)
         loop.add_reader(tun, functools.partial(handle_tun_read, tun))
         loop.run_forever()
