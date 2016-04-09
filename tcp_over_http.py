@@ -137,7 +137,7 @@ def handle_request(listen_reader, listen_writer):
     loop = asyncio.get_event_loop()
     try:
         send_reader, send_writer = yield from asyncio.open_connection(
-            redsocks_addr[0], redsocks_addr[1], loop=loop)
+            redsocks_addr[0], redsocks_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
     except ConnectionRefusedError:
         logging.error('redsocks refused our connection')
         listen_writer.close()
