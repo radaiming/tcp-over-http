@@ -9,7 +9,6 @@ import functools
 import logging
 import os
 import pwd
-import socket
 import struct
 import subprocess
 import sys
@@ -24,47 +23,8 @@ IFF_TUN = 0x0001
 IFF_NO_PI = 0x1000
 TUNSETOWNER = TUNSETIFF + 2
 nat_table = {}
-
-
-class SendProtocol(asyncio.Protocol):
-    def __init__(self, transport):
-        self.transport = None
-        # use listen_transport to send data back
-        self.listen_transport = transport
-
-    def connection_made(self, transport):
-        self.transport = transport
-
-    def data_received(self, data):
-        self.listen_transport.write(data)
-
-    def connection_lost(self, exc):
-        self.listen_transport.close()
-
-
-class ListenProtocol(asyncio.Protocol):
-    """
-    listen for forwarded packet, then call SendProtocol
-    to send them to redsocks server
-    """
-    def __init__(self, redsocks_addr):
-        self.server, self.port = redsocks_addr
-        self.transport = None
-        # use send_transport to send data to redsocks server
-        self.send_transport = None
-        self.loop = asyncio.get_event_loop()
-
-    def connection_made(self, transport):
-        self.transport = transport
-        self.send_transport, _ = yield from self.loop.create_connection(
-            lambda: SendProtocol(self.transport), self.server, self.port)
-
-    def data_received(self, data):
-        self.send_transport.write(data)
-
-    def connection_lost(self, exc):
-        if self.send_transport:
-            self.send_transport.close()
+listen_port = 39999
+redsocks_addr = ('127.0.0.1', 8123)
 
 
 def switch_user(tun):
@@ -151,7 +111,7 @@ def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
 
 
 @asyncio.coroutine
-def process_packet(tun, packet, listen_port):
+def process_packet(tun, packet):
     global nat_table
     listen_ip = TUN_IP
     src_ip, src_port, dst_ip, dst_port = parse_tcp_packet(packet)
@@ -165,21 +125,50 @@ def process_packet(tun, packet, listen_port):
     tun.write(new_packet)
 
 
-def handle_read(tun, listen_port):
+def handle_tun_read(tun):
     packet = tun.read(MTU)
     if packet[9:10] != b'\x06':
         logging.debug('non TCP packet received, dropping')
         return
     loop = asyncio.get_event_loop()
-    asyncio.ensure_future(process_packet(tun, packet, listen_port), loop=loop)
+    asyncio.ensure_future(process_packet(tun, packet), loop=loop)
+
+
+@asyncio.coroutine
+def handle_request(listen_reader, listen_writer):
+    loop = asyncio.get_event_loop()
+    send_reader, send_writer = yield from asyncio.open_connection(
+        redsocks_addr[0], redsocks_addr[1], loop=loop)
+    task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
+    task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
+    while True:
+        done, pending = yield from asyncio.wait(
+            [task_listen_reader, task_send_reader],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        # two reader tasks may in the done at the same time
+        if task_listen_reader in done:
+            data = yield from task_listen_reader
+            send_writer.write(data)
+            yield from send_writer.drain()
+            task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
+        if task_send_reader in done:
+            data = yield from task_send_reader
+            listen_writer.write(data)
+            yield from listen_writer.drain()
+            task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
+        if listen_reader.at_eof() or send_reader.at_eof():
+            listen_writer.close()
+            send_writer.close()
+            break
 
 
 def main():
+    global redsocks_addr
     if os.getuid() != 0:
         sys.exit('please run this script as root')
     parser = argparse.ArgumentParser(description='Forward TCP packets to redsocks using TUN')
-    parser.add_argument('-x', action='store', dest='redsocks_addr',
-                        default='127.0.0.1:8123', required=True,
+    parser.add_argument('-x', action='store', dest='redsocks_addr', default='127.0.0.1:8123',
                         help='address:port of redsocks server, default to 127.0.0.1:12345')
     parser.add_argument('--debug', action='store_true', dest='debug', default=False,
                         help='enable debug outputing')
@@ -192,18 +181,14 @@ def main():
                         format='%(asctime)s %(levelname)-8s %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S')
     redsocks_addr = args.redsocks_addr.split(':')
-    redsocks_addr = (redsocks_addr[0], redsocks_addr[1])
+    redsocks_addr = (redsocks_addr[0], int(redsocks_addr[1]))
     try:
         tun = create_tun()
         switch_user(tun)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind((TUN_IP, 0))
-        sock.listen(2)
-        _, listen_port = sock.getsockname()
         loop = asyncio.get_event_loop()
-        listen_coro = loop.create_connection(lambda: ListenProtocol(redsocks_addr), sock=sock)
+        listen_coro = asyncio.start_server(handle_request, TUN_IP, listen_port, loop=loop)
         loop.run_until_complete(listen_coro)
-        loop.add_reader(tun, functools.partial(handle_read, tun, listen_port))
+        loop.add_reader(tun, functools.partial(handle_tun_read, tun))
         loop.run_forever()
     finally:
         loop.close()
