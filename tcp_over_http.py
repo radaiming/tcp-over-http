@@ -119,25 +119,27 @@ def handle_tun_read(tun):
         logging.debug('non TCP packet received, dropping')
         return
     src_ip, src_port, dst_ip, dst_port = parse_tcp_packet(packet)
-    logging.debug('%s:%s -> %s:%s' % (src_ip, src_port, dst_ip, dst_port))
+    logging.debug('read packet from tun: %s:%s -> %s:%s' % (src_ip, src_port, dst_ip, dst_port))
     if src_ip == listen_ip and src_port == str(listen_port):
         new_src_ip, new_src_port = nat_table[dst_ip + ':' + dst_port][1:]
         new_dst_ip = nat_table[dst_ip + ':' + dst_port][0]
         new_packet = mangle_packet(packet, new_src_ip, new_src_port, new_dst_ip, dst_port)
+        logging.debug('write new packet to tun: %s:%s -> %s:%s' % (new_src_ip, new_src_port, new_dst_ip, dst_port))
     else:
         nat_table[fake_src_ip + ':' + src_port] = (src_ip, dst_ip, dst_port)
         new_packet = mangle_packet(packet, fake_src_ip, src_port, listen_ip, listen_port)
+        logging.debug('write new packet to tun: %s:%s -> %s:%s' % (fake_src_ip, src_port, listen_ip, listen_port))
     tun.write(new_packet)
 
 
 @asyncio.coroutine
 def handle_request(listen_reader, listen_writer):
     remote_peer = listen_writer.transport.get_extra_info('peername')
-    logging.debug('query from %s:%d forwarding to redsocks' % remote_peer)
     loop = asyncio.get_event_loop()
     try:
         send_reader, send_writer = yield from asyncio.open_connection(
             redsocks_addr[0], redsocks_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
+        logging.debug('from %s:%d: connected to redsocks server' % remote_peer)
     except ConnectionRefusedError:
         logging.error('redsocks refused our connection')
         listen_writer.close()
@@ -151,16 +153,19 @@ def handle_request(listen_reader, listen_writer):
         )
         # two reader tasks may in the done at the same time
         if task_listen_reader in done:
+            logging.debug('from %s:%d: get data from listen_reader' % remote_peer)
             data = yield from task_listen_reader
             send_writer.write(data)
             yield from send_writer.drain()
             task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
         if task_send_reader in done:
+            logging.debug('from %s:%d: get data from send reader' % remote_peer)
             data = yield from task_send_reader
             listen_writer.write(data)
             yield from listen_writer.drain()
             task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
         if listen_reader.at_eof() or send_reader.at_eof():
+            logging.debug('from %s:%d: finish rw, now exit' % remote_peer)
             listen_writer.close()
             send_writer.close()
             break
