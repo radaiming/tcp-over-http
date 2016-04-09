@@ -9,6 +9,7 @@ import functools
 import logging
 import os
 import pwd
+import re
 import struct
 import subprocess
 import sys
@@ -121,7 +122,11 @@ def handle_tun_read(tun):
     src_ip, src_port, dst_ip, dst_port = parse_tcp_packet(packet)
     logging.debug('read packet from tun: %s:%s -> %s:%s' % (src_ip, src_port, dst_ip, dst_port))
     if src_ip == listen_ip and src_port == str(listen_port):
-        new_src_ip, new_src_port = nat_table[dst_ip + ':' + dst_port][1:]
+        try:
+            new_src_ip, new_src_port = nat_table[dst_ip + ':' + dst_port][1:]
+        except KeyError:
+            # when restarting this program, some old packet may come in
+            return
         new_dst_ip = nat_table[dst_ip + ':' + dst_port][0]
         new_packet = mangle_packet(packet, new_src_ip, new_src_port, new_dst_ip, dst_port)
         logging.debug('write new packet to tun: %s:%s -> %s:%s' % (new_src_ip, new_src_port, new_dst_ip, dst_port))
@@ -134,12 +139,28 @@ def handle_tun_read(tun):
 
 @asyncio.coroutine
 def handle_request(listen_reader, listen_writer):
-    remote_peer = listen_writer.transport.get_extra_info('peername')
+    local_peer = listen_writer.transport.get_extra_info('peername')
     loop = asyncio.get_event_loop()
     try:
         send_reader, send_writer = yield from asyncio.open_connection(
             redsocks_addr[0], redsocks_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
-        logging.debug('from %s:%d: connected to redsocks server' % remote_peer)
+        logging.debug('from %s:%d: connected to redsocks server' % local_peer)
+        target_addr = nat_table[('%s:%d' % local_peer)][1:]
+        conn_bytes = ('CONNECT %s:%s HTTP/1.1\r\nAccept: */*\r\n\r\n' % target_addr).encode('ascii')
+        send_writer.write(conn_bytes)
+        data = yield from send_reader.read(MTU)
+        ret = re.match('HTTP/\d\.\d\s+?(\d+?)\s+?', data.decode('ascii', 'ignore'))
+        if not ret:
+            status_code = 'unknown'
+        else:
+            status_code = ret.groups()[0]
+        if status_code != '200':
+            err_msg = 'failed to connect to proxy server: ' + status_code
+            logging.error(err_msg)
+            listen_writer.write(err_msg.encode('ascii', 'ignore'))
+            listen_writer.close()
+            send_writer.close()
+            return
     except ConnectionRefusedError:
         logging.error('redsocks refused our connection')
         listen_writer.close()
@@ -153,19 +174,19 @@ def handle_request(listen_reader, listen_writer):
         )
         # two reader tasks may in the done at the same time
         if task_listen_reader in done:
-            logging.debug('from %s:%d: get data from listen_reader' % remote_peer)
+            logging.debug('from %s:%d: get data from listen_reader' % local_peer)
             data = yield from task_listen_reader
             send_writer.write(data)
             yield from send_writer.drain()
             task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
         if task_send_reader in done:
-            logging.debug('from %s:%d: get data from send reader' % remote_peer)
+            logging.debug('from %s:%d: get data from send reader' % local_peer)
             data = yield from task_send_reader
             listen_writer.write(data)
             yield from listen_writer.drain()
             task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
         if listen_reader.at_eof() or send_reader.at_eof():
-            logging.debug('from %s:%d: finish rw, now exit' % remote_peer)
+            logging.debug('from %s:%d: finish rw, now exit' % local_peer)
             listen_writer.close()
             send_writer.close()
             break
