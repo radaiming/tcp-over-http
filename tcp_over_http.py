@@ -146,7 +146,8 @@ def handle_request(listen_reader, listen_writer):
             redsocks_addr[0], redsocks_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
         logging.debug('from %s:%d: connected to redsocks server' % local_peer)
         target_addr = nat_table[('%s:%d' % local_peer)][1:]
-        conn_bytes = ('CONNECT %s:%s HTTP/1.1\r\nAccept: */*\r\n\r\n' % target_addr).encode('ascii')
+        conn_msg = 'CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
+        conn_bytes = conn_msg.encode('ascii')
         send_writer.write(conn_bytes)
         data = yield from send_reader.read(MTU)
         ret = re.match('HTTP/\d\.\d\s+?(\d+?)\s+?', data.decode('ascii', 'ignore'))
