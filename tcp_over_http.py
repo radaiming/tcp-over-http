@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # Created @ 2016-04-05 10:25 by @radaiming
+# I nearly copied all logic in this article:
+# http://fqrouter.tumblr.com/post/51474945203/socks%E4%BB%A3%E7%90%86%E8%BD%ACvpn#_=_
 #
 
 import argparse
