@@ -142,6 +142,10 @@ def handle_tun_read(tun):
 @asyncio.coroutine
 def handle_request(listen_reader, listen_writer):
     local_peer = listen_writer.transport.get_extra_info('peername')
+    # avoid exception if someone else directly send request to here
+    if ('%s:%d' % local_peer) not in nat_table:
+        listen_writer.close()
+        return
     loop = asyncio.get_event_loop()
     try:
         send_reader, send_writer = yield from asyncio.open_connection(
