@@ -146,8 +146,8 @@ def handle_request(listen_reader, listen_writer):
     try:
         send_reader, send_writer = yield from asyncio.open_connection(
             proxy_addr[0], proxy_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
-        logging.debug('from %s:%d: connected to proxy server' % local_peer)
         target_addr = nat_table[('%s:%d' % local_peer)][1:]
+        logging.debug('%s:%d -> %s:%s: connected to proxy server' % (local_peer + target_addr))
         conn_msg = 'CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
         conn_bytes = conn_msg.encode('ascii')
         send_writer.write(conn_bytes)
@@ -189,14 +189,16 @@ def handle_request(listen_reader, listen_writer):
                 listen_writer.write(data)
                 yield from listen_writer.drain()
                 task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
-        except ConnectionResetError:
-            logging.error('connection reset during handling connection to %s:%s' % target_addr)
-        finally:
             if listen_reader.at_eof() or send_reader.at_eof():
                 logging.debug('from %s:%d: finish rw, now exit' % local_peer)
                 listen_writer.close()
                 send_writer.close()
                 break
+        except (ConnectionResetError, BrokenPipeError) as exp:
+            logging.error('error on connecting to %s:%s: ' % target_addr + str(exp))
+            listen_writer.close()
+            send_writer.close()
+            break
 
 
 def main():
