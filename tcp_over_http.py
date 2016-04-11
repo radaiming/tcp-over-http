@@ -29,7 +29,7 @@ nat_table = {}
 fake_src_ip = '10.45.39.3'
 listen_ip = TUN_IP
 listen_port = 39999
-redsocks_addr = ('127.0.0.1', 8123)
+proxy_addr = ('127.0.0.1', 8123)
 
 
 def switch_user(tun):
@@ -145,8 +145,8 @@ def handle_request(listen_reader, listen_writer):
     loop = asyncio.get_event_loop()
     try:
         send_reader, send_writer = yield from asyncio.open_connection(
-            redsocks_addr[0], redsocks_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
-        logging.debug('from %s:%d: connected to redsocks server' % local_peer)
+            proxy_addr[0], proxy_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
+        logging.debug('from %s:%d: connected to proxy server' % local_peer)
         target_addr = nat_table[('%s:%d' % local_peer)][1:]
         conn_msg = 'CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
         conn_bytes = conn_msg.encode('ascii')
@@ -165,7 +165,7 @@ def handle_request(listen_reader, listen_writer):
             send_writer.close()
             return
     except ConnectionRefusedError:
-        logging.error('redsocks refused our connection')
+        logging.error('proxy server refused our connection')
         listen_writer.close()
         return
     task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
@@ -200,12 +200,12 @@ def handle_request(listen_reader, listen_writer):
 
 
 def main():
-    global redsocks_addr
+    global proxy_addr
     if os.getuid() != 0:
         sys.exit('please run this script as root')
-    parser = argparse.ArgumentParser(description='Forward TCP packets to redsocks using TUN')
-    parser.add_argument('-x', action='store', dest='redsocks_addr', default='127.0.0.1:8123',
-                        help='address:port of redsocks server, default to 127.0.0.1:12345')
+    parser = argparse.ArgumentParser(description='Forward TCP packets to HTTP proxy using TUN')
+    parser.add_argument('-x', action='store', dest='proxy_addr', default='127.0.0.1:8123',
+                        help='address:port of proxy server, default to 127.0.0.1:12345')
     parser.add_argument('--debug', action='store_true', dest='debug', default=False,
                         help='enable debug outputing')
     args = parser.parse_args(sys.argv[1:])
@@ -216,8 +216,8 @@ def main():
     logging.basicConfig(level=logging_level,
                         format='%(asctime)s %(levelname)-8s %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S')
-    redsocks_addr = args.redsocks_addr.split(':')
-    redsocks_addr = (redsocks_addr[0], int(redsocks_addr[1]))
+    proxy_addr = args.proxy_addr.split(':')
+    proxy_addr = (proxy_addr[0], int(proxy_addr[1]))
     try:
         tun = create_tun()
         switch_user(tun)
