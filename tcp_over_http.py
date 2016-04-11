@@ -171,28 +171,32 @@ def handle_request(listen_reader, listen_writer):
     task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
     task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
     while True:
-        done, pending = yield from asyncio.wait(
-            [task_listen_reader, task_send_reader],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-        # two reader tasks may in the done at the same time
-        if task_listen_reader in done:
-            logging.debug('from %s:%d: get data from listen_reader' % local_peer)
-            data = yield from task_listen_reader
-            send_writer.write(data)
-            yield from send_writer.drain()
-            task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
-        if task_send_reader in done:
-            logging.debug('from %s:%d: get data from send reader' % local_peer)
-            data = yield from task_send_reader
-            listen_writer.write(data)
-            yield from listen_writer.drain()
-            task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
-        if listen_reader.at_eof() or send_reader.at_eof():
-            logging.debug('from %s:%d: finish rw, now exit' % local_peer)
-            listen_writer.close()
-            send_writer.close()
-            break
+        try:
+            done, pending = yield from asyncio.wait(
+                [task_listen_reader, task_send_reader],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            # two reader tasks may in the done at the same time
+            if task_listen_reader in done:
+                logging.debug('from %s:%d: get data from listen_reader' % local_peer)
+                data = yield from task_listen_reader
+                send_writer.write(data)
+                yield from send_writer.drain()
+                task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
+            if task_send_reader in done:
+                logging.debug('from %s:%d: get data from send reader' % local_peer)
+                data = yield from task_send_reader
+                listen_writer.write(data)
+                yield from listen_writer.drain()
+                task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
+        except ConnectionResetError:
+            logging.error('connection reset during handling connection to %s:%s' % target_addr)
+        finally:
+            if listen_reader.at_eof() or send_reader.at_eof():
+                logging.debug('from %s:%d: finish rw, now exit' % local_peer)
+                listen_writer.close()
+                send_writer.close()
+                break
 
 
 def main():
