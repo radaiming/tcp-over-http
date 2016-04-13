@@ -196,9 +196,9 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
             self.sending_sock.sendall(data)
 
 
-class ThreadedTCPServer(socketserver.TCPServer, socketserver.ThreadingMixIn):
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
     allow_reuse_address = True
-    pass
 
 
 def main():
