@@ -113,7 +113,7 @@ def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
 def handle_tun_read(tun):
     global nat_table
     packet = tun.read(MTU)
-    if packet[9:10] != b'\x06':
+    if packet[9] != 6:
         logging.debug('non TCP packet received, dropping')
         return
     src_port = (packet[20] << 8) + packet[21]
