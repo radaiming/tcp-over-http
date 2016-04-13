@@ -87,34 +87,33 @@ def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
     new_port_checksum += (bytes_src_port[0] << 8) + bytes_src_port[1]
     new_port_checksum += (bytes_dst_port[0] << 8) + bytes_dst_port[1]
 
-    old_addr_port_checksum = 0
+    old_addr_checksum = 0
+    old_port_checksum = 0
     i = 12
+    while i < 20:
+        old_addr_checksum += (packet[i] << 8) + packet[i+1]
+        i += 2
     while i < 24:
-        old_addr_port_checksum += (packet[i] << 8) + packet[i+1]
+        old_port_checksum += (packet[i] << 8) + packet[i+1]
         i += 2
 
-    # fix IP checksum
-    # https://en.wikipedia.org/wiki/IPv4#Header_Checksum
-    # http://www.codeproject.com/Tips/460867/Python-Implementation-of-IP-Checksum
-    ip_checksum = 0
-    i = 0
-    while i < 10:
-        ip_checksum += (packet[i] << 8) + packet[i+1]
-        i += 2
-    ip_checksum += new_addr_checksum
-    ip_checksum = (ip_checksum >> 16 & 0xffff) + (ip_checksum & 0xffff)
+    old_ip_checksum = (packet[10] << 8) + packet[11]
+    old_ip_checksum = (~old_ip_checksum) & 0xffff
+    delta = new_addr_checksum - old_addr_checksum
+    abs_delta = abs(delta)
+    if delta > 0:
+        ip_checksum = old_ip_checksum + abs_delta
+    else:
+        ip_checksum = old_ip_checksum - abs_delta
+    while ip_checksum >> 16:
+        ip_checksum = (ip_checksum >> 16) + (ip_checksum & 0xffff)
     ip_checksum = (~ip_checksum) & 0xffff
 
-    # fix TCP checksum
-    # https://en.wikipedia.org/wiki/Transmission_Control_Protocol#Checksum_computation
-    # http://www.netfor2.com/tcpsum.htm
     old_tcp_checksum = (packet[36] << 8) + packet[37]
     old_tcp_checksum = (~old_tcp_checksum) & 0xffff
     new_addr_port_checksum = new_addr_checksum + new_port_checksum
-    delta = new_addr_port_checksum - old_addr_port_checksum
+    delta = new_addr_port_checksum - (old_addr_checksum + old_port_checksum)
     abs_delta = abs(delta)
-    while abs_delta >> 16:
-        abs_delta = (abs_delta >> 16) + (abs_delta & 0xffff)
     if delta > 0:
         tcp_checksum = old_tcp_checksum + abs_delta
     else:
