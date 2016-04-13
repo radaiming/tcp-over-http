@@ -174,7 +174,7 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
             if status_code != '200':
                 err_msg = 'failed to connect to proxy server: ' + status_code
                 logging.error(err_msg)
-                self.request.close()
+                self.shutdown_request(self.request)
             logging.debug('%s:%d -> %s:%d: connected to proxy server' %
                           (self.client_address + target_addr))
             sending_thread = threading.Thread(target=sending_task, args=(self.sending_sock, self.request))
@@ -182,18 +182,17 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
             sending_thread.start()
         except ConnectionRefusedError:
             logging.error('proxy server refused our connection')
-            self.request.close()
+            self.shutdown_request(self.request)
 
     def handle(self):
         if ('%s:%d' % self.client_address) not in nat_table:
             logging.info('connection from %s:%d not in nat_table' % self.client_address)
-            self.request.close()
+            return
         while True:
             data = self.request.recv(MTU)
             if not data:
                 logging.info('read no data from %s:%d' % self.client_address)
-                self.sending_sock.close()
-                self.request.close()
+                break
             self.sending_sock.sendall(data)
 
 
