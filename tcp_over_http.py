@@ -98,29 +98,25 @@ def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
         i += 2
 
     old_ip_checksum = (packet[10] << 8) + packet[11]
-    old_ip_checksum = (~old_ip_checksum) & 0xffff
     delta = new_addr_checksum - old_addr_checksum
     abs_delta = abs(delta)
     if delta > 0:
-        ip_checksum = old_ip_checksum + abs_delta
-    else:
         ip_checksum = old_ip_checksum - abs_delta
+    else:
+        ip_checksum = old_ip_checksum + abs_delta
     while ip_checksum >> 16:
         ip_checksum = (ip_checksum >> 16) + (ip_checksum & 0xffff)
-    ip_checksum = (~ip_checksum) & 0xffff
 
     old_tcp_checksum = (packet[36] << 8) + packet[37]
-    old_tcp_checksum = (~old_tcp_checksum) & 0xffff
     new_addr_port_checksum = new_addr_checksum + new_port_checksum
     delta = new_addr_port_checksum - (old_addr_checksum + old_port_checksum)
     abs_delta = abs(delta)
     if delta > 0:
-        tcp_checksum = old_tcp_checksum + abs_delta
-    else:
         tcp_checksum = old_tcp_checksum - abs_delta
+    else:
+        tcp_checksum = old_tcp_checksum + abs_delta
     while tcp_checksum >> 16:
         tcp_checksum = (tcp_checksum >> 16) + (tcp_checksum & 0xffff)
-    tcp_checksum = (~tcp_checksum) & 0xffff
 
     new_packet = packet[:10] + int(ip_checksum).to_bytes(2, 'big') +\
         bytes_src_ip + bytes_dst_ip + bytes_src_port + bytes_dst_port +\
