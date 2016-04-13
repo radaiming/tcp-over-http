@@ -58,19 +58,11 @@ def create_tun():
     return tun
 
 
-def parse_tcp_packet(packet):
-    src_ip = '%d.%d.%d.%d' % tuple(list(packet[12:16]))
-    dst_ip = '%d.%d.%d.%d' % tuple(list(packet[16:20]))
-    src_port = str((packet[20] << 8) + packet[21])
-    dst_port = str((packet[22] << 8) + packet[23])
-    return src_ip, src_port, dst_ip, dst_port
-
-
 def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
     bytes_src_ip = socket.inet_aton(src_ip)
     bytes_dst_ip = socket.inet_aton(dst_ip)
-    bytes_src_port = int(src_port).to_bytes(2, 'big')
-    bytes_dst_port = int(dst_port).to_bytes(2, 'big')
+    bytes_src_port = src_port.to_bytes(2, 'big')
+    bytes_dst_port = dst_port.to_bytes(2, 'big')
 
     new_addr_checksum = 0
     new_addr_checksum += (bytes_src_ip[0] << 8) + bytes_src_ip[1]
@@ -124,21 +116,24 @@ def handle_tun_read(tun):
     if packet[9:10] != b'\x06':
         logging.debug('non TCP packet received, dropping')
         return
-    src_ip, src_port, dst_ip, dst_port = parse_tcp_packet(packet)
-    logging.debug('read packet from tun: %s:%s -> %s:%s' % (src_ip, src_port, dst_ip, dst_port))
-    if src_ip == listen_ip and src_port == str(listen_port):
+    src_port = (packet[20] << 8) + packet[21]
+    dst_port = (packet[22] << 8) + packet[23]
+    src_ip = socket.inet_ntoa(packet[12:16])
+    dst_ip = socket.inet_ntoa(packet[16:20])
+    logging.debug('read packet from tun: %s:%d -> %s:%d' % (src_ip, src_port, dst_ip, dst_port))
+    if src_ip == listen_ip and src_port == listen_port:
         try:
-            new_src_ip, new_src_port = nat_table[dst_ip + ':' + dst_port][1:]
+            new_src_ip, new_src_port = nat_table[dst_ip + ':' + str(dst_port)][1:]
         except KeyError:
             # when restarting this program, some old packet may come in
             return
-        new_dst_ip = nat_table[dst_ip + ':' + dst_port][0]
+        new_dst_ip = nat_table[dst_ip + ':' + str(dst_port)][0]
         new_packet = mangle_packet(packet, new_src_ip, new_src_port, new_dst_ip, dst_port)
-        logging.debug('write new packet to tun: %s:%s -> %s:%s' % (new_src_ip, new_src_port, new_dst_ip, dst_port))
+        logging.debug('write new packet to tun: %s:%d -> %s:%d' % (new_src_ip, new_src_port, new_dst_ip, dst_port))
     else:
-        nat_table[fake_src_ip + ':' + src_port] = (src_ip, dst_ip, dst_port)
+        nat_table[fake_src_ip + ':' + str(src_port)] = (src_ip, dst_ip, dst_port)
         new_packet = mangle_packet(packet, fake_src_ip, src_port, listen_ip, listen_port)
-        logging.debug('write new packet to tun: %s:%s -> %s:%s' % (fake_src_ip, src_port, listen_ip, listen_port))
+        logging.debug('write new packet to tun: %s:%d -> %s:%d' % (fake_src_ip, src_port, listen_ip, listen_port))
     tun.write(new_packet)
 
 
@@ -154,8 +149,8 @@ def handle_request(listen_reader, listen_writer):
         send_reader, send_writer = yield from asyncio.open_connection(
             proxy_addr[0], proxy_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
         target_addr = nat_table[('%s:%d' % local_peer)][1:]
-        logging.debug('%s:%d -> %s:%s: connected to proxy server' % (local_peer + target_addr))
-        conn_msg = 'CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
+        logging.debug('%s:%d -> %s:%d: connected to proxy server' % (local_peer + target_addr))
+        conn_msg = 'CONNECT %s:%d HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
         conn_bytes = conn_msg.encode('ascii')
         send_writer.write(conn_bytes)
         data = yield from send_reader.read(MTU)
