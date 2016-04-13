@@ -139,16 +139,16 @@ def handle_tun_read(tun):
 
 
 def sending_task(sending_sock, listen_sock):
-    sock_sel = selectors.DefaultSelector()
-    sock_sel.register(sending_sock, selectors.EVENT_READ)
     while True:
-        for _, _ in sock_sel.select():
+        try:
             data = sending_sock.recv(MTU)
             if not data:
-                sending_sock.close()
-                listen_sock.close()
+                logging.info('no data for %s:%d' % listen_sock.getpeername())
                 break
             listen_sock.sendall(data)
+        except OSError:
+            # socket closed, OSError: [Errno 9] Bad file descriptor
+            break
 
 
 class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
@@ -158,8 +158,6 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
 
     def setup(self):
         target_addr = nat_table[('%s:%d' % self.client_address)][1:]
-        logging.debug('%s:%d -> %s:%d: connected to proxy server' %
-                      (self.client_address + target_addr))
         try:
             self.sending_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sending_sock.bind(('127.0.0.1', 0))
@@ -176,25 +174,27 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
             if status_code != '200':
                 err_msg = 'failed to connect to proxy server: ' + status_code
                 logging.error(err_msg)
-                self.shutdown_request()
+                self.request.close()
+            logging.debug('%s:%d -> %s:%d: connected to proxy server' %
+                          (self.client_address + target_addr))
             sending_thread = threading.Thread(target=sending_task, args=(self.sending_sock, self.request))
             sending_thread.setDaemon(True)
             sending_thread.start()
         except ConnectionRefusedError:
             logging.error('proxy server refused our connection')
-            self.shutdown_request()
+            self.request.close()
 
     def handle(self):
         if ('%s:%d' % self.client_address) not in nat_table:
-            self.shutdown_request()
-        data = self.request.recv(MTU)
-        if not data:
-            self.sending_sock.close()
-            self.shutdown_request()
-        self.sending_sock.sendall(data)
-
-    def finish(self):
-        self.sending_sock.close()
+            logging.info('connection from %s:%d not in nat_table' % self.client_address)
+            self.request.close()
+        while True:
+            data = self.request.recv(MTU)
+            if not data:
+                logging.info('read no data from %s:%d' % self.client_address)
+                self.sending_sock.close()
+                self.request.close()
+            self.sending_sock.sendall(data)
 
 
 class ThreadedTCPServer(socketserver.TCPServer, socketserver.ThreadingMixIn):
