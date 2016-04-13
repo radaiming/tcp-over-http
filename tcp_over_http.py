@@ -5,17 +5,18 @@
 #
 
 import argparse
-import asyncio
 import fcntl
-import functools
 import logging
 import os
 import pwd
 import re
+import selectors
 import socket
+import socketserver
 import struct
 import subprocess
 import sys
+import threading
 
 USER = 'nobody'
 GROUP = 'nobody'
@@ -137,70 +138,68 @@ def handle_tun_read(tun):
     tun.write(new_packet)
 
 
-@asyncio.coroutine
-def handle_request(listen_reader, listen_writer):
-    local_peer = listen_writer.transport.get_extra_info('peername')
-    # avoid exception if someone else directly send request to here
-    if ('%s:%d' % local_peer) not in nat_table:
-        listen_writer.close()
-        return
-    loop = asyncio.get_event_loop()
-    try:
-        send_reader, send_writer = yield from asyncio.open_connection(
-            proxy_addr[0], proxy_addr[1], loop=loop, local_addr=('127.0.0.1', 0))
-        target_addr = nat_table[('%s:%d' % local_peer)][1:]
-        logging.debug('%s:%d -> %s:%d: connected to proxy server' % (local_peer + target_addr))
-        conn_msg = 'CONNECT %s:%d HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
-        conn_bytes = conn_msg.encode('ascii')
-        send_writer.write(conn_bytes)
-        data = yield from send_reader.read(MTU)
-        ret = re.match('HTTP/\d\.\d\s+?(\d+?)\s+?', data.decode('ascii', 'ignore'))
-        if not ret:
-            status_code = 'unknown'
-        else:
-            status_code = ret.groups()[0]
-        if status_code != '200':
-            err_msg = 'failed to connect to proxy server: ' + status_code
-            logging.error(err_msg)
-            listen_writer.write(err_msg.encode('ascii', 'ignore'))
-            listen_writer.close()
-            send_writer.close()
-            return
-    except ConnectionRefusedError:
-        logging.error('proxy server refused our connection')
-        listen_writer.close()
-        return
-    task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
-    task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
+def sending_task(sending_sock, listen_sock):
+    sock_sel = selectors.DefaultSelector()
+    sock_sel.register(sending_sock, selectors.EVENT_READ)
     while True:
-        try:
-            done, pending = yield from asyncio.wait(
-                [task_listen_reader, task_send_reader],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            # two reader tasks may in the done at the same time
-            if task_listen_reader in done:
-                logging.debug('from %s:%d: get data from listen_reader' % local_peer)
-                data = yield from task_listen_reader
-                send_writer.write(data)
-                yield from send_writer.drain()
-                task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
-            if task_send_reader in done:
-                logging.debug('from %s:%d: get data from send reader' % local_peer)
-                data = yield from task_send_reader
-                listen_writer.write(data)
-                yield from listen_writer.drain()
-                task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
-            if listen_reader.at_eof() or send_reader.at_eof():
-                logging.debug('from %s:%d: finish rw, now exit' % local_peer)
-                listen_writer.close()
-                send_writer.close()
+        for _, _ in sock_sel.select():
+            data = sending_sock.recv(MTU)
+            if not data:
+                sending_sock.close()
+                listen_sock.close()
                 break
-        except (ConnectionResetError, BrokenPipeError) as exp:
-            logging.error('error on connecting to %s:%s: ' % target_addr + str(exp))
-            listen_writer.close()
-            send_writer.close()
-            break
+            listen_sock.sendall(data)
+
+
+class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
+    def __init__(self, request, client_address, server):
+        super().__init__(request, client_address, server)
+        self.sending_sock = None
+
+    def setup(self):
+        target_addr = nat_table[('%s:%d' % self.client_address)][1:]
+        logging.debug('%s:%d -> %s:%d: connected to proxy server' %
+                      (self.client_address + target_addr))
+        try:
+            self.sending_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sending_sock.bind(('127.0.0.1', 0))
+            self.sending_sock.connect(proxy_addr)
+            conn_msg = 'CONNECT %s:%d HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
+            conn_bytes = conn_msg.encode('ascii')
+            self.sending_sock.sendall(conn_bytes)
+            response = self.sending_sock.recv(MTU)
+            ret = re.match('HTTP/\d\.\d\s+?(\d+?)\s+?', response.decode('ascii', 'ignore'))
+            if not ret:
+                status_code = 'unknown'
+            else:
+                status_code = ret.groups()[0]
+            if status_code != '200':
+                err_msg = 'failed to connect to proxy server: ' + status_code
+                logging.error(err_msg)
+                self.shutdown_request()
+            sending_thread = threading.Thread(target=sending_task, args=(self.sending_sock, self.request))
+            sending_thread.setDaemon(True)
+            sending_thread.start()
+        except ConnectionRefusedError:
+            logging.error('proxy server refused our connection')
+            self.shutdown_request()
+
+    def handle(self):
+        if ('%s:%d' % self.client_address) not in nat_table:
+            self.shutdown_request()
+        data = self.request.recv(MTU)
+        if not data:
+            self.sending_sock.close()
+            self.shutdown_request()
+        self.sending_sock.sendall(data)
+
+    def finish(self):
+        self.sending_sock.close()
+
+
+class ThreadedTCPServer(socketserver.TCPServer, socketserver.ThreadingMixIn):
+    allow_reuse_address = True
+    pass
 
 
 def main():
@@ -225,13 +224,18 @@ def main():
     try:
         tun = create_tun()
         switch_user(tun)
-        loop = asyncio.get_event_loop()
-        listen_coro = asyncio.start_server(handle_request, listen_ip, listen_port, loop=loop)
-        loop.run_until_complete(listen_coro)
-        loop.add_reader(tun, functools.partial(handle_tun_read, tun))
-        loop.run_forever()
+        server = ThreadedTCPServer((listen_ip, listen_port), ThreadedTCPRequestHandler)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.setDaemon(True)
+        server_thread.start()
+        tun_sel = selectors.DefaultSelector()
+        tun_sel.register(tun, selectors.EVENT_READ)
+        while True:
+            for _, _ in tun_sel.select():
+                handle_tun_read(tun)
     finally:
-        loop.close()
+        server.shutdown()
+        server.server_close()
         tun.close()
 
 
