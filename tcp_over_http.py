@@ -12,6 +12,7 @@ import logging
 import os
 import pwd
 import re
+import socket
 import struct
 import subprocess
 import sys
@@ -65,16 +66,9 @@ def parse_tcp_packet(packet):
     return src_ip, src_port, dst_ip, dst_port
 
 
-def ip_to_bytes(ip):
-    bytes_ip = b''
-    for i in map(int, ip.split('.')):
-        bytes_ip += bytes([i])
-    return bytes_ip
-
-
 def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
-    bytes_src_ip = ip_to_bytes(src_ip)
-    bytes_dst_ip = ip_to_bytes(dst_ip)
+    bytes_src_ip = socket.inet_aton(src_ip)
+    bytes_dst_ip = socket.inet_aton(dst_ip)
     bytes_src_port = int(src_port).to_bytes(2, 'big')
     bytes_dst_port = int(dst_port).to_bytes(2, 'big')
 
