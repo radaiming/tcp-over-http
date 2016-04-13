@@ -72,47 +72,63 @@ def ip_to_bytes(ip):
     return bytes_ip
 
 
-def fix_checksum(packet, bytes_src_ip, bytes_dst_ip):
+def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
+    bytes_src_ip = ip_to_bytes(src_ip)
+    bytes_dst_ip = ip_to_bytes(dst_ip)
+    bytes_src_port = int(src_port).to_bytes(2, 'big')
+    bytes_dst_port = int(dst_port).to_bytes(2, 'big')
+
     # fix IP checksum
     # https://en.wikipedia.org/wiki/IPv4#Header_Checksum
     # http://www.codeproject.com/Tips/460867/Python-Implementation-of-IP-Checksum
     ip_checksum = 0
-    ip_header = packet[:10] + b'\x00\x00' + packet[12:20]
-    while len(ip_header):
-        ip_checksum += (ip_header[0] << 8) + ip_header[1]
-        ip_header = ip_header[2:]
+    i = 0
+    while i < 10:
+        ip_checksum += (packet[i] << 8) + packet[i+1]
+        i += 2
+    src_dst_checksum = 0
+    src_dst_checksum += (bytes_src_ip[0] << 8) + bytes_src_ip[1]
+    src_dst_checksum += (bytes_src_ip[2] << 8) + bytes_src_ip[3]
+    src_dst_checksum += (bytes_dst_ip[0] << 8) + bytes_dst_ip[1]
+    src_dst_checksum += (bytes_dst_ip[2] << 8) + bytes_dst_ip[3]
+    ip_checksum += src_dst_checksum
     ip_checksum = (ip_checksum >> 16 & 0xffff) + (ip_checksum & 0xffff)
     ip_checksum = (~ip_checksum) & 0xffff
-    new_packet = packet[:10] + int(ip_checksum).to_bytes(2, 'big')
 
     # fix TCP checksum
     # https://en.wikipedia.org/wiki/Transmission_Control_Protocol#Checksum_computation
     # http://www.netfor2.com/tcpsum.htm
     tcp_checksum = 0
-    pseudo_tcp_header = bytes_src_ip + bytes_dst_ip + b'\x00\x06'
     tcp_length = len(packet[20:]).to_bytes(2, 'big')
-    pseudo_tcp_header += tcp_length
-    pseudo_tcp_packet = pseudo_tcp_header + packet[20:36] + b'\x00\x00' + packet[38:]
-    if len(pseudo_tcp_packet) % 2 != 0:
-        pseudo_tcp_packet += b'\x00'
-    while len(pseudo_tcp_packet):
-        tcp_checksum += (pseudo_tcp_packet[0] << 8) + pseudo_tcp_packet[1]
-        pseudo_tcp_packet = pseudo_tcp_packet[2:]
+    tcp_checksum += src_dst_checksum
+    # packet type is tcp
+    tcp_checksum += 6
+    tcp_checksum += (tcp_length[0] << 8) + tcp_length[1]
+    tcp_checksum += (bytes_src_port[0] << 8) + bytes_src_port[1]
+    tcp_checksum += (bytes_dst_port[0] << 8) + bytes_dst_port[1]
+    i = 24
+    while i < 36:
+        tcp_checksum += (packet[i] << 8) + packet[i+1]
+        i += 2
+    remain_length = len(packet[38:])
+    if remain_length % 2 != 0:
+        # fill b'\x00' at last
+        remain_length -= 1
+        tcp_checksum += packet[-1] << 8
+    i = 38
+    remain_length += i
+    while i < remain_length:
+        tcp_checksum += (packet[i] << 8) + packet[i+1]
+        i += 2
+
     while tcp_checksum >> 16:
         tcp_checksum = (tcp_checksum & 0xffff) + (tcp_checksum >> 16)
     tcp_checksum = (~tcp_checksum) & 0xffff
 
-    new_packet += packet[12:36] + int(tcp_checksum).to_bytes(2, 'big') + packet[38:]
+    new_packet = packet[:10] + int(ip_checksum).to_bytes(2, 'big') +\
+        bytes_src_ip + bytes_dst_ip + bytes_src_port + bytes_dst_port +\
+        packet[24:36] + int(tcp_checksum).to_bytes(2, 'big') + packet[38:]
     return new_packet
-
-
-def mangle_packet(packet, src_ip, src_port, dst_ip, dst_port):
-    bytes_src_ip = ip_to_bytes(src_ip)
-    bytes_dst_ip = ip_to_bytes(dst_ip)
-    bytes_src_port = int(src_port).to_bytes(2, 'big')
-    bytes_dst_port = int(dst_port).to_bytes(2, 'big') + packet[24:]
-    new_packet = packet[0:12] + bytes_src_ip + bytes_dst_ip + bytes_src_port + bytes_dst_port
-    return fix_checksum(new_packet, bytes_src_ip, bytes_dst_ip)
 
 
 def handle_tun_read(tun):
