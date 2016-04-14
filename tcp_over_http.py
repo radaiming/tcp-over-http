@@ -141,7 +141,7 @@ def handle_tun_read(tun):
 def handle_sending(send_reader, listen_writer):
     while True:
         try:
-            data = yield from send_reader.read(MTU)
+            data = yield from send_reader.read(4096)
             listen_writer.write(data)
             yield from listen_writer.drain()
             if send_reader.at_eof():
@@ -168,7 +168,7 @@ def handle_request(listen_reader, listen_writer):
         conn_msg = 'CONNECT %s:%d HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
         conn_bytes = conn_msg.encode('ascii')
         send_writer.write(conn_bytes)
-        data = yield from send_reader.read(MTU)
+        data = yield from send_reader.read(4096)
         ret = re.match('HTTP/\d\.\d\s+?(\d+?)\s+?', data.decode('ascii', 'ignore'))
         if not ret:
             status_code = 'unknown'
@@ -188,7 +188,7 @@ def handle_request(listen_reader, listen_writer):
     asyncio.ensure_future(handle_sending(send_reader, listen_writer))
     while True:
         try:
-            data = yield from asyncio.ensure_future(listen_reader.read(MTU))
+            data = yield from asyncio.ensure_future(listen_reader.read(4096))
             send_writer.write(data)
             yield from send_writer.drain()
             if listen_reader.at_eof():
