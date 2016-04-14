@@ -138,6 +138,21 @@ def handle_tun_read(tun):
 
 
 @asyncio.coroutine
+def handle_sending(send_reader, listen_writer):
+    while True:
+        try:
+            data = yield from send_reader.read(MTU)
+            listen_writer.write(data)
+            yield from listen_writer.drain()
+            if send_reader.at_eof():
+                listen_writer.close()
+                break
+        except (ConnectionResetError, BrokenPipeError):
+            listen_writer.close()
+            break
+
+
+@asyncio.coroutine
 def handle_request(listen_reader, listen_writer):
     local_peer = listen_writer.transport.get_extra_info('peername')
     # avoid exception if someone else directly send request to here
@@ -170,36 +185,17 @@ def handle_request(listen_reader, listen_writer):
         logging.error('proxy server refused our connection')
         listen_writer.close()
         return
-    task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
-    task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
+    asyncio.ensure_future(handle_sending(send_reader, listen_writer))
     while True:
         try:
-            done, pending = yield from asyncio.wait(
-                [task_listen_reader, task_send_reader],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            # two reader tasks may in the done at the same time
-            if task_listen_reader in done:
-                logging.debug('from %s:%d: get data from listen_reader' % local_peer)
-                data = yield from task_listen_reader
-                send_writer.write(data)
-                yield from send_writer.drain()
-                task_listen_reader = asyncio.ensure_future(listen_reader.read(MTU), loop=loop)
-            if task_send_reader in done:
-                logging.debug('from %s:%d: get data from send reader' % local_peer)
-                data = yield from task_send_reader
-                listen_writer.write(data)
-                yield from listen_writer.drain()
-                task_send_reader = asyncio.ensure_future(send_reader.read(MTU), loop=loop)
-            if listen_reader.at_eof() or send_reader.at_eof():
-                logging.debug('from %s:%d: finish rw, now exit' % local_peer)
+            data = yield from asyncio.ensure_future(listen_reader.read(MTU))
+            send_writer.write(data)
+            yield from send_writer.drain()
+            if listen_reader.at_eof():
                 listen_writer.close()
-                send_writer.close()
                 break
-        except (ConnectionResetError, BrokenPipeError) as exp:
-            logging.error('error on connecting to %s:%s: ' % target_addr + str(exp))
+        except (ConnectionResetError, BrokenPipeError):
             listen_writer.close()
-            send_writer.close()
             break
 
 
