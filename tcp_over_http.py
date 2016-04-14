@@ -153,45 +153,37 @@ def sending_task(sending_sock, listen_sock):
 
 class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
     def __init__(self, request, client_address, server):
-        super().__init__(request, client_address, server)
         self.sending_sock = None
+        self.target_addr = nat_table[('%s:%d' % client_address)][1:]
+        self.conn_info = '%s:%d -> %s:%d: ' % (client_address + self.target_addr)
+        super().__init__(request, client_address, server)
 
     def setup(self):
-        target_addr = nat_table[('%s:%d' % self.client_address)][1:]
-        try:
-            self.sending_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sending_sock.bind(('127.0.0.1', 0))
-            self.sending_sock.connect(proxy_addr)
-            conn_msg = 'CONNECT %s:%d HTTP/1.1\r\nHost: %s:%s\r\n\r\n' % (target_addr * 2)
-            conn_bytes = conn_msg.encode('ascii')
-            self.sending_sock.sendall(conn_bytes)
-            response = self.sending_sock.recv(MTU)
-            ret = re.match('HTTP/\d\.\d\s+?(\d+?)\s+?', response.decode('ascii', 'ignore'))
-            if not ret:
-                status_code = 'unknown'
-            else:
-                status_code = ret.groups()[0]
-            if status_code != '200':
-                err_msg = 'failed to connect to proxy server: ' + status_code
-                logging.error(err_msg)
-                self.shutdown_request(self.request)
-            logging.debug('%s:%d -> %s:%d: connected to proxy server' %
-                          (self.client_address + target_addr))
-            sending_thread = threading.Thread(target=sending_task, args=(self.sending_sock, self.request))
-            sending_thread.setDaemon(True)
-            sending_thread.start()
-        except ConnectionRefusedError:
-            logging.error('proxy server refused our connection')
-            self.shutdown_request(self.request)
+        self.sending_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sending_sock.bind(('127.0.0.1', 0))
+        self.sending_sock.connect(proxy_addr)
+        conn_msg = 'CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n' % (self.target_addr * 2)
+        conn_bytes = conn_msg.encode('ascii')
+        self.sending_sock.sendall(conn_bytes)
+        response = self.sending_sock.recv(MTU)
+        ret = re.match('HTTP/\d\.\d\s+?(\d+?)\s+?', response.decode('ascii', 'ignore'))
+        if not ret:
+            status_code = 'unknown'
+        else:
+            status_code = ret.groups()[0]
+        if status_code != '200':
+            err_msg = self.conn_info + 'error connect to proxy server: ' + status_code
+            raise ConnectionError(err_msg)
+        logging.debug(self.conn_info + 'connected to proxy server')
+        sending_thread = threading.Thread(target=sending_task, args=(self.sending_sock, self.request))
+        sending_thread.setDaemon(True)
+        sending_thread.start()
 
     def handle(self):
-        if ('%s:%d' % self.client_address) not in nat_table:
-            logging.info('connection from %s:%d not in nat_table' % self.client_address)
-            return
         while True:
             data = self.request.recv(MTU)
             if not data:
-                logging.info('read no data from %s:%d' % self.client_address)
+                logging.info(self.conn_info + 'no data from client, now break')
                 break
             self.sending_sock.sendall(data)
 
