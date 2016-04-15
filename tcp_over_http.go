@@ -3,8 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/user"
 	"strconv"
+	"syscall"
 
 	"github.com/songgao/water"
 )
@@ -37,12 +40,37 @@ func setup_tun(name string) {
 	check(err, "failed to set MTU")
 }
 
+func switch_user(iface *water.Interface) {
+	// this is not working correctly
+	user_info, err := user.Lookup(target_user)
+	check(err, "could not find user "+target_user)
+	target_uid, err := strconv.Atoi(user_info.Uid)
+	check(err, "UID is not string ? "+user_info.Uid)
+	/*
+		_, _, err = syscall.Syscall(
+			syscall.SYS_IOCTL,
+			uintptr(iface.File().Fd()),
+			uintptr(syscall.TUNSETOWNER),
+			uintptr(target_uid))
+	*/
+	check(err, "failed to set TUN owner")
+	err = syscall.Setuid(target_uid)
+	check(err, "failed to switch UID")
+}
+
 func main() {
 	flag.StringVar(&proxy_server, "x", "127.0.0.1:8123", "address:port of proxy server, default to")
 	flag.Parse()
+	curr_user, _ := user.Current()
+	if curr_user.Uid != "0" {
+		fmt.Println("please run this script as root")
+		os.Exit(1)
+	}
+
 	iface, err := water.NewTUN("")
 	check(err, "failed to create TUN device")
 	setup_tun(iface.Name())
+	// switch_user(iface)
 	buffer := make([]byte, mtu)
 	for {
 		_, err := iface.Read(buffer)
