@@ -107,7 +107,7 @@ func handleConn(listenConn net.Conn) {
 	x := natTable[srcPort][1]
 	y := natTable[srcPort][2]
 	targetIP := fmt.Sprintf("%d.%d.%d.%d", x[0], x[1], x[2], x[3])
-	targetPort := int(y[0]<<8) + int(y[1])
+	targetPort := int(y[0])<<8 + int(y[1])
 	connStr := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", targetIP, targetPort, targetIP, targetPort)
 	proxyConn.Write([]byte(connStr))
 	resp := make([]byte, 1024)
@@ -160,20 +160,20 @@ func listenServer() {
 
 func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dstPort []byte) {
 	newAddrChksum, newPortChksum, oldAddrChksum, oldPortChksum := 0, 0, 0, 0
-	newAddrChksum += int(srcIP[0]<<8) + int(srcIP[1])
-	newAddrChksum += int(srcIP[2]<<8) + int(srcIP[3])
-	newAddrChksum += int(dstIp[0]<<8) + int(dstIp[1])
-	newAddrChksum += int(dstIp[2]<<8) + int(dstIp[3])
-	newPortChksum += int(srcPort[0]<<8) + int(srcPort[1])
-	newPortChksum += int(dstPort[0]<<8) + int(dstPort[1])
+	newAddrChksum += int(srcIP[0])<<8 + int(srcIP[1])
+	newAddrChksum += int(srcIP[2])<<8 + int(srcIP[3])
+	newAddrChksum += int(dstIp[0])<<8 + int(dstIp[1])
+	newAddrChksum += int(dstIp[2])<<8 + int(dstIp[3])
+	newPortChksum += int(srcPort[0])<<8 + int(srcPort[1])
+	newPortChksum += int(dstPort[0])<<8 + int(dstPort[1])
 	for i := 12; i < 20; i += 2 {
-		oldAddrChksum += int(packet[i]<<8) + int(packet[i+1])
+		oldAddrChksum += int(packet[i])<<8 + int(packet[i+1])
 	}
 	for i := 20; i < 24; i += 2 {
-		oldPortChksum += int(packet[i]<<8) + int(packet[i+1])
+		oldPortChksum += int(packet[i])<<8 + int(packet[i+1])
 	}
-	oldIPChksum := int(packet[10]<<8) + int(packet[11])
-	oldTCPChksum := int(packet[36]<<8) + int(packet[37])
+	oldIPChksum := int(packet[10])<<8 + int(packet[11])
+	oldTCPChksum := int(packet[36])<<8 + int(packet[37])
 
 	newIPChksum := oldIPChksum - (newAddrChksum - oldAddrChksum)
 	for {
@@ -211,14 +211,14 @@ func handlePacket(iface *water.Interface, packet []byte) {
 	srcIP := packet[12:16]
 	dstIP := packet[16:20]
 	if bytes.Equal(srcIP, byteListenIP) && bytes.Equal(srcPort, byteListenPort) {
-		key := int(dstPort[0]<<8) + int(dstPort[1])
+		key := int(dstPort[0])<<8 + int(dstPort[1])
 		addrs, ok := natTable[key]
 		if !ok {
 			return
 		}
 		manglePacket(packet, addrs[1], addrs[2], addrs[0], dstPort)
 	} else {
-		key := int(srcPort[0]<<8) + int(srcPort[1])
+		key := int(srcPort[0])<<8 + int(srcPort[1])
 		natTable[key] = [][]byte{srcIP, dstIP, dstPort}
 		manglePacket(packet, byteFakeSrcIP, srcPort, byteListenIP, byteListenPort)
 	}
