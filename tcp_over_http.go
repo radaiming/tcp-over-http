@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/songgao/water"
@@ -65,8 +67,79 @@ func switchUser(iface *water.Interface) {
 	check(err, "failed to switch UID")
 }
 
-func handleConn(conn net.Conn) {
-	return
+func handleReading(proxyConn *net.TCPConn, listenConn net.Conn) {
+	defer proxyConn.Close()
+	defer listenConn.Close()
+	data := make([]byte, mtu)
+	for {
+		n, err := proxyConn.Read(data)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		n, err = listenConn.Write(data[:n])
+		if err != nil {
+			log.Println(err)
+			return
+		}
+	}
+}
+
+func handleConn(listenConn net.Conn) {
+	defer listenConn.Close()
+	srcPort, err := strconv.Atoi(strings.Split(listenConn.RemoteAddr().String(), ":")[1])
+	if err != nil {
+		log.Println("could not get source port of the incoming connection")
+		return
+	}
+	if _, ok := natTable[srcPort]; !ok {
+		log.Println(fmt.Sprintf("%d not in nat table", srcPort))
+		return
+	}
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", proxyServer)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	proxyConn, err := net.DialTCP("tcp", localAddr, remoteAddr)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer proxyConn.Close()
+	x := natTable[srcPort][1]
+	y := natTable[srcPort][2]
+	targetIP := fmt.Sprintf("%d.%d.%d.%d", x[0], x[1], x[2], x[3])
+	targetPort := int(y[0]<<8) + int(y[1])
+	connStr := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", targetIP, targetPort, targetIP, targetPort)
+	proxyConn.Write([]byte(connStr))
+	resp := make([]byte, 1024)
+	n, err := proxyConn.Read(resp)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	reg := regexp.MustCompile(`HTTP/\d\.\d\s+?(\d+?)\s+?`)
+	ret := reg.FindSubmatch(resp[:n])
+	returnCode := "unknown"
+	if ret != nil {
+		returnCode = string(ret[1])
+	}
+	if returnCode != "200" {
+		log.Println("failed to connect to proxy server: " + returnCode)
+		return
+	}
+	go handleReading(proxyConn, listenConn)
+	data := make([]byte, mtu)
+	for {
+		n, err := listenConn.Read(data)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		_, err = proxyConn.Write(data[:n])
+		if err != nil {
+			log.Println(err)
+			return
+		}
+	}
 }
 
 func listenServer() {
