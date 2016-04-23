@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
@@ -84,8 +85,47 @@ func listenServer() {
 	}
 }
 
-func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dstPort []byte) []byte {
-	return []byte{}
+func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dstPort []byte) {
+	newAddrChksum, newPortChksum, oldAddrChksum, oldPortChksum := 0, 0, 0, 0
+	newAddrChksum += int(srcIP[0]<<8) + int(srcIP[1])
+	newAddrChksum += int(srcIP[2]<<8) + int(srcIP[3])
+	newAddrChksum += int(dstIp[0]<<8) + int(dstIp[1])
+	newAddrChksum += int(dstIp[2]<<8) + int(dstIp[3])
+	newPortChksum += int(srcPort[0]<<8) + int(srcPort[1])
+	newPortChksum += int(dstPort[0]<<8) + int(dstPort[1])
+	for i := 12; i < 20; i += 2 {
+		oldAddrChksum += int(packet[i]<<8) + int(packet[i+1])
+	}
+	for i := 20; i < 24; i += 2 {
+		oldPortChksum += int(packet[i]<<8) + int(packet[i+1])
+	}
+	oldIPChksum := int(packet[10]<<8) + int(packet[11])
+	oldTCPChksum := int(packet[36]<<8) + int(packet[37])
+
+	newIPChksum := oldIPChksum - (newAddrChksum - oldAddrChksum)
+	for {
+		if (newIPChksum >> 16) > 0 {
+			newIPChksum = (newIPChksum >> 16) + (newIPChksum & 0xffff)
+		} else {
+			break
+		}
+	}
+
+	newTCPChksum := oldTCPChksum - (newAddrChksum + newPortChksum - oldAddrChksum - oldPortChksum)
+	for {
+		if (newTCPChksum >> 16) > 0 {
+			newTCPChksum = (newTCPChksum >> 16) + newTCPChksum&0xffff
+		} else {
+			break
+		}
+	}
+
+	binary.BigEndian.PutUint16(packet[11:13], uint16(newIPChksum))
+	binary.BigEndian.PutUint16(packet[37:39], uint16(newTCPChksum))
+	copy(packet[12:16], srcIP)
+	copy(packet[16:20], dstIp)
+	copy(packet[20:22], srcPort)
+	copy(packet[22:24], dstPort)
 }
 
 func handlePacket(iface *water.Interface, packet []byte) {
@@ -97,20 +137,19 @@ func handlePacket(iface *water.Interface, packet []byte) {
 	dstPort := packet[22:23]
 	srcIP := packet[12:16]
 	dstIP := packet[16:20]
-	var newPacket []byte
 	if bytes.Equal(srcIP, byteListenIP) && bytes.Equal(srcPort, byteListenPort) {
-		key := int((dstPort[0] << 8) + dstPort[1])
+		key := int(dstPort[0]<<8) + int(dstPort[1])
 		addrs, ok := natTable[key]
 		if !ok {
 			return
 		}
-		newPacket = manglePacket(packet, addrs[1], addrs[2], addrs[0], dstPort)
+		manglePacket(packet, addrs[1], addrs[2], addrs[0], dstPort)
 	} else {
-		key := int((srcPort[0] << 8) + srcPort[1])
+		key := int(srcPort[0]<<8) + int(srcPort[1])
 		natTable[key] = [][]byte{srcIP, dstIP, dstPort}
-		newPacket = manglePacket(packet, byteFakeSrcIP, srcPort, byteListenIP, byteListenPort)
+		manglePacket(packet, byteFakeSrcIP, srcPort, byteListenIP, byteListenPort)
 	}
-	iface.Write(newPacket)
+	iface.Write(packet)
 }
 
 func main() {
