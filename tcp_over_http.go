@@ -133,8 +133,8 @@ func handlePacket(iface *water.Interface, packet []byte) {
 		log.Println("non TCP packet received, dropping")
 		return
 	}
-	srcPort := packet[20:21]
-	dstPort := packet[22:23]
+	srcPort := packet[20:22]
+	dstPort := packet[22:24]
 	srcIP := packet[12:16]
 	dstIP := packet[16:20]
 	if bytes.Equal(srcIP, byteListenIP) && bytes.Equal(srcPort, byteListenPort) {
