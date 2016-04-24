@@ -30,6 +30,7 @@ var (
 	byteListenPort = []byte{0x9c, 0x3f}
 	proxyServer    = "127.0.0.1:8123"
 	natTable       = make(map[int][][]byte)
+	enableDebug    = false
 )
 
 func logPanicIfErr(msg string, err error) {
@@ -39,6 +40,9 @@ func logPanicIfErr(msg string, err error) {
 }
 
 func debug(msg string, err error) {
+	if !enableDebug {
+		return
+	}
 	if err != nil {
 		log.Printf("%s: %s\n", msg, err)
 	} else {
@@ -222,6 +226,7 @@ func handlePacket(iface *water.Interface, packet []byte) {
 
 func main() {
 	flag.StringVar(&proxyServer, "x", "127.0.0.1:8123", "address:port of proxy server, default to")
+	flag.BoolVar(&enableDebug, "debug", false, "enable debug outputing")
 	flag.Parse()
 	currUser, _ := user.Current()
 	if currUser.Uid != "0" {
