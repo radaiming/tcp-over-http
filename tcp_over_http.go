@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/songgao/water"
 )
@@ -49,22 +48,6 @@ func setupTun(name string) {
 	check(err, "failed to set MTU")
 }
 
-func switchUser(iface *water.Interface) {
-	// this is not working correctly
-	user_info, err := user.Lookup(targetUser)
-	check(err, "could not find user "+targetUser)
-	target_uid, err := strconv.Atoi(user_info.Uid)
-	check(err, "UID is not string ? "+user_info.Uid)
-	/*
-		_, _, err = syscall.Syscall(
-			syscall.SYS_IOCTL,
-			uintptr(iface.File().Fd()),
-			uintptr(syscall.TUNSETOWNER),
-			uintptr(target_uid))
-	*/
-	check(err, "failed to set TUN owner")
-	err = syscall.Setuid(target_uid)
-	check(err, "failed to switch UID")
 }
 
 func handleReading(proxyConn *net.TCPConn, listenConn net.Conn) {
@@ -241,7 +224,6 @@ func main() {
 	iface, err := water.NewTUN("")
 	check(err, "failed to create TUN device")
 	setupTun(iface.Name())
-	// switchUser(iface)
 	go listenServer()
 
 	buffer := make([]byte, mtu)
