@@ -177,7 +177,7 @@ func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dst
 
 	newIPChksum := oldIPChksum - (newAddrChksum - oldAddrChksum)
 	for {
-		if (newIPChksum >> 16) > 0 {
+		if (newIPChksum >> 16) != 0 {
 			newIPChksum = (newIPChksum >> 16) + (newIPChksum & 0xffff)
 		} else {
 			break
@@ -186,7 +186,7 @@ func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dst
 
 	newTCPChksum := oldTCPChksum - (newAddrChksum + newPortChksum - oldAddrChksum - oldPortChksum)
 	for {
-		if (newTCPChksum >> 16) > 0 {
+		if (newTCPChksum >> 16) != 0 {
 			newTCPChksum = (newTCPChksum >> 16) + newTCPChksum&0xffff
 		} else {
 			break
