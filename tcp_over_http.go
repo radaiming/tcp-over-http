@@ -32,22 +32,27 @@ var (
 	natTable       = make(map[int][][]byte)
 )
 
-func check(err error, err_info string) {
+func logPanicIfErr(msg string, err error) {
 	if err != nil {
-		fmt.Println(err_info)
-		panic(err)
+		log.Panic("%s: %s\n", msg, err)
+	}
+}
+
+func debug(msg string, err error) {
+	if err != nil {
+		log.Printf("%s: %s\n", msg, err)
+	} else {
+		log.Println(msg)
 	}
 }
 
 func setupTun(name string) {
 	err := exec.Command("ip", "addr", "add", fmt.Sprintf("%s/%d", tunIP, netmask), "dev", name).Run()
-	check(err, "failed to set IP")
+	logPanicIfErr("failed to set IP", err)
 	err = exec.Command("ip", "link", "set", name, "up").Run()
-	check(err, "failed to bring up device")
+	logPanicIfErr("failed to bring up device", err)
 	err = exec.Command("ip", "link", "set", "dev", name, "mtu", strconv.Itoa(mtu)).Run()
-	check(err, "failed to set MTU")
-}
-
+	logPanicIfErr("failed to set MTU", err)
 }
 
 func handleReading(proxyConn *net.TCPConn, listenConn net.Conn) {
@@ -57,12 +62,14 @@ func handleReading(proxyConn *net.TCPConn, listenConn net.Conn) {
 	for {
 		n, err := proxyConn.Read(data)
 		if err != nil {
-			log.Println(err)
+			if err.Error() != "EOF" {
+				debug("error reading from proxy server", err)
+			}
 			return
 		}
 		n, err = listenConn.Write(data[:n])
 		if err != nil {
-			log.Println(err)
+			debug("err writing to client", err)
 			return
 		}
 	}
@@ -72,18 +79,18 @@ func handleConn(listenConn net.Conn) {
 	defer listenConn.Close()
 	srcPort, err := strconv.Atoi(strings.Split(listenConn.RemoteAddr().String(), ":")[1])
 	if err != nil {
-		log.Println("could not get source port of the incoming connection")
+		debug("could not get source port of the incoming connection", err)
 		return
 	}
 	if _, ok := natTable[srcPort]; !ok {
-		log.Println(fmt.Sprintf("%d not in nat table", srcPort))
+		debug(fmt.Sprintf("%d not in nat table", srcPort), nil)
 		return
 	}
 	remoteAddr, _ := net.ResolveTCPAddr("tcp", proxyServer)
 	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
 	proxyConn, err := net.DialTCP("tcp", localAddr, remoteAddr)
 	if err != nil {
-		log.Println(err)
+		debug("failed to connect to proxy server", err)
 		return
 	}
 	defer proxyConn.Close()
@@ -96,7 +103,7 @@ func handleConn(listenConn net.Conn) {
 	resp := make([]byte, 1024)
 	n, err := proxyConn.Read(resp)
 	if err != nil {
-		log.Println(err)
+		debug("error reading from proxy server", err)
 		return
 	}
 	reg := regexp.MustCompile(`HTTP/\d\.\d\s+?(\d+?)\s+?`)
@@ -106,7 +113,7 @@ func handleConn(listenConn net.Conn) {
 		returnCode = string(ret[1])
 	}
 	if returnCode != "200" {
-		log.Println("failed to connect to proxy server: " + returnCode)
+		debug("failed to connect to proxy server: "+returnCode, nil)
 		return
 	}
 	go handleReading(proxyConn, listenConn)
@@ -114,12 +121,14 @@ func handleConn(listenConn net.Conn) {
 	for {
 		n, err := listenConn.Read(data)
 		if err != nil {
-			log.Println(err)
+			if err.Error() != "EOF" {
+				debug("error reading from client", err)
+			}
 			return
 		}
 		_, err = proxyConn.Write(data[:n])
 		if err != nil {
-			log.Println(err)
+			debug("error writing to proxy server", err)
 			return
 		}
 	}
@@ -128,13 +137,13 @@ func handleConn(listenConn net.Conn) {
 func listenServer() {
 	addrStr := fmt.Sprintf("%s:%d", listenIP, listenPort)
 	listenAddr, err := net.ResolveTCPAddr("tcp", addrStr)
-	check(err, "could not parse listen address "+addrStr)
+	logPanicIfErr("could not parse listen address", err)
 	ln, err := net.ListenTCP("tcp", listenAddr)
-	check(err, fmt.Sprintf("could not listen on %s:%d", listenIP, listenPort))
+	logPanicIfErr("could not listen on given address", err)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Println(err)
+			debug("error reading client request", err)
 			continue
 		}
 		go handleConn(conn)
@@ -186,7 +195,6 @@ func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dst
 
 func handlePacket(iface *water.Interface, packet []byte) {
 	if packet[9] != 6 {
-		log.Println("non TCP packet received, dropping")
 		return
 	}
 	srcPort := make([]byte, 2)
@@ -222,14 +230,14 @@ func main() {
 	}
 
 	iface, err := water.NewTUN("")
-	check(err, "failed to create TUN device")
+	logPanicIfErr("failed to create TUN device", err)
 	setupTun(iface.Name())
 	go listenServer()
 
 	buffer := make([]byte, mtu)
 	for {
 		n, err := iface.Read(buffer)
-		check(err, "error reading from TUN")
 		logPanicIfErr("error reading from TUN", err)
+		handlePacket(iface, buffer[:n])
 	}
 }
