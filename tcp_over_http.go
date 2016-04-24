@@ -248,6 +248,6 @@ func main() {
 	for {
 		n, err := iface.Read(buffer)
 		check(err, "error reading from TUN")
-		go handlePacket(iface, buffer[:n])
+		logPanicIfErr("error reading from TUN", err)
 	}
 }
