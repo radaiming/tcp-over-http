@@ -206,10 +206,14 @@ func handlePacket(iface *water.Interface, packet []byte) {
 		log.Println("non TCP packet received, dropping")
 		return
 	}
-	srcPort := packet[20:22]
-	dstPort := packet[22:24]
-	srcIP := packet[12:16]
-	dstIP := packet[16:20]
+	srcPort := make([]byte, 2)
+	dstPort := make([]byte, 2)
+	srcIP := make([]byte, 4)
+	dstIP := make([]byte, 4)
+	copy(srcPort, packet[20:22])
+	copy(dstPort, packet[22:24])
+	copy(srcIP, packet[12:16])
+	copy(dstIP, packet[16:20])
 	if bytes.Equal(srcIP, byteListenIP) && bytes.Equal(srcPort, byteListenPort) {
 		key := int(dstPort[0])<<8 + int(dstPort[1])
 		addrs, ok := natTable[key]
