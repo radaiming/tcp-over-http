@@ -193,8 +193,8 @@ func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dst
 		}
 	}
 
-	binary.BigEndian.PutUint16(packet[11:13], uint16(newIPChksum))
-	binary.BigEndian.PutUint16(packet[37:39], uint16(newTCPChksum))
+	binary.BigEndian.PutUint16(packet[10:12], uint16(newIPChksum))
+	binary.BigEndian.PutUint16(packet[36:38], uint16(newTCPChksum))
 	copy(packet[12:16], srcIP)
 	copy(packet[16:20], dstIp)
 	copy(packet[20:22], srcPort)
