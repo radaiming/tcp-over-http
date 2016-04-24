@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/songgao/water"
 )
@@ -31,6 +32,7 @@ var (
 	proxyServer    = "127.0.0.1:8123"
 	natTable       = make(map[int][][]byte)
 	enableDebug    = false
+	natTableLock   sync.RWMutex
 )
 
 func logPanicIfErr(msg string, err error) {
@@ -86,7 +88,10 @@ func handleConn(listenConn net.Conn) {
 		debug("could not get source port of the incoming connection", err)
 		return
 	}
-	if _, ok := natTable[srcPort]; !ok {
+	natTableLock.RLock()
+	_, ok := natTable[srcPort]
+	natTableLock.RUnlock()
+	if !ok {
 		debug(fmt.Sprintf("%d not in nat table", srcPort), nil)
 		return
 	}
@@ -98,8 +103,10 @@ func handleConn(listenConn net.Conn) {
 		return
 	}
 	defer proxyConn.Close()
+	natTableLock.RLock()
 	x := natTable[srcPort][1]
 	y := natTable[srcPort][2]
+	natTableLock.RLocker()
 	targetIP := fmt.Sprintf("%d.%d.%d.%d", x[0], x[1], x[2], x[3])
 	targetPort := int(y[0])<<8 + int(y[1])
 	connStr := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", targetIP, targetPort, targetIP, targetPort)
@@ -211,14 +218,18 @@ func handlePacket(iface *water.Interface, packet []byte) {
 	copy(dstIP, packet[16:20])
 	if bytes.Equal(srcIP, byteListenIP) && bytes.Equal(srcPort, byteListenPort) {
 		key := int(dstPort[0])<<8 + int(dstPort[1])
+		natTableLock.RLock()
 		addrs, ok := natTable[key]
+		natTableLock.RUnlock()
 		if !ok {
 			return
 		}
 		manglePacket(packet, addrs[1], addrs[2], addrs[0], dstPort)
 	} else {
 		key := int(srcPort[0])<<8 + int(srcPort[1])
+		natTableLock.RLock()
 		natTable[key] = [][]byte{srcIP, dstIP, dstPort}
+		natTableLock.RUnlock()
 		manglePacket(packet, byteFakeSrcIP, srcPort, byteListenIP, byteListenPort)
 	}
 	iface.Write(packet)
