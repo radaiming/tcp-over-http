@@ -61,19 +61,23 @@ func setupTun(name string) {
 	logPanicIfErr("failed to set MTU", err)
 }
 
-func handleReading(proxyConn *net.TCPConn, listenConn net.Conn) {
+func handleReading(proxyConn *net.TCPConn, listenConn net.Conn, proxyConnLock sync.RWMutex, listenConnLock sync.RWMutex) {
 	defer proxyConn.Close()
 	defer listenConn.Close()
 	data := make([]byte, mtu)
 	for {
+		proxyConnLock.RLock()
 		n, err := proxyConn.Read(data)
+		proxyConnLock.RUnlock()
 		if err != nil {
 			if err.Error() != "EOF" {
 				debug("error reading from proxy server", err)
 			}
 			return
 		}
+		listenConnLock.Lock()
 		n, err = listenConn.Write(data[:n])
+		listenConnLock.Unlock()
 		if err != nil {
 			debug("err writing to client", err)
 			return
@@ -83,6 +87,9 @@ func handleReading(proxyConn *net.TCPConn, listenConn net.Conn) {
 
 func handleConn(listenConn net.Conn) {
 	defer listenConn.Close()
+	// avoid concurrent rw
+	var listenConnLock sync.RWMutex
+	var proxyConnLock sync.RWMutex
 	srcPort, err := strconv.Atoi(strings.Split(listenConn.RemoteAddr().String(), ":")[1])
 	if err != nil {
 		debug("could not get source port of the incoming connection", err)
@@ -127,17 +134,21 @@ func handleConn(listenConn net.Conn) {
 		debug("failed to connect to proxy server: "+returnCode, nil)
 		return
 	}
-	go handleReading(proxyConn, listenConn)
+	go handleReading(proxyConn, listenConn, proxyConnLock, listenConnLock)
 	data := make([]byte, mtu)
 	for {
+		listenConnLock.RLock()
 		n, err := listenConn.Read(data)
+		listenConnLock.RUnlock()
 		if err != nil {
 			if err.Error() != "EOF" {
 				debug("error reading from client", err)
 			}
 			return
 		}
+		proxyConnLock.Lock()
 		_, err = proxyConn.Write(data[:n])
+		proxyConnLock.Unlock()
 		if err != nil {
 			debug("error writing to proxy server", err)
 			return
