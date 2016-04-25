@@ -106,7 +106,7 @@ func handleConn(listenConn net.Conn) {
 	natTableLock.RLock()
 	x := natTable[srcPort][1]
 	y := natTable[srcPort][2]
-	natTableLock.RLocker()
+	natTableLock.RUnlock()
 	targetIP := fmt.Sprintf("%d.%d.%d.%d", x[0], x[1], x[2], x[3])
 	targetPort := int(y[0])<<8 + int(y[1])
 	connStr := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", targetIP, targetPort, targetIP, targetPort)
