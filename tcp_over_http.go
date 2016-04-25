@@ -227,9 +227,9 @@ func handlePacket(iface *water.Interface, packet []byte) {
 		manglePacket(packet, addrs[1], addrs[2], addrs[0], dstPort)
 	} else {
 		key := int(srcPort[0])<<8 + int(srcPort[1])
-		natTableLock.RLock()
+		natTableLock.Lock()
 		natTable[key] = [][]byte{srcIP, dstIP, dstPort}
-		natTableLock.RUnlock()
+		natTableLock.Unlock()
 		manglePacket(packet, byteFakeSrcIP, srcPort, byteListenIP, byteListenPort)
 	}
 	iface.Write(packet)
