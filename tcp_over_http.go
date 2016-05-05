@@ -13,31 +13,37 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/songgao/water"
+	"github.com/streamrail/concurrent-map"
 )
 
 var (
-	targetUser     = "nobody"
-	tunIP          = "10.45.39.1"
-	fakeSrcIP      = "10.45.39.3"
-	netmask        = 24
-	mtu            = 1500
-	listenIP       = tunIP
-	byteListenIP   = []byte{0x0a, 0x2d, 0x27, 0x1}
-	byteFakeSrcIP  = []byte{0x0a, 0x2d, 0x27, 0x3}
-	listenPort     = 39999
-	byteListenPort = []byte{0x9c, 0x3f}
-	proxyServer    = "127.0.0.1:8123"
-	natTable       = make(map[int][][]byte)
-	enableDebug    = false
-	natTableLock   sync.RWMutex
+	proxyServer = "127.0.0.1:8123"
+	enableDebug = false
 )
+
+// Server TUN Server
+type Server struct {
+	targetUser      string
+	tunIP           string
+	fakeSrcIP       string
+	netmask         uint32
+	mtu             int
+	listenIP        string
+	listenPort      uint16
+	byteListenIP    []byte
+	byteFakeSrcIP   []byte
+	byteListenPort  []byte
+	proxyServerAddr string
+	remoteAddr      *net.TCPAddr
+	natTable        cmap.ConcurrentMap
+	enableDebug     bool
+}
 
 func logPanicIfErr(msg string, err error) {
 	if err != nil {
-		log.Panic("%s: %s\n", msg, err)
+		log.Panicf("%s: %s\n", msg, err)
 	}
 }
 
@@ -52,32 +58,26 @@ func debug(msg string, err error) {
 	}
 }
 
-func setupTun(name string) {
-	err := exec.Command("ip", "addr", "add", fmt.Sprintf("%s/%d", tunIP, netmask), "dev", name).Run()
+func (s *Server) setupTun(name string) {
+	err := exec.Command("ip", "addr", "add", fmt.Sprintf("%s/%d", s.tunIP, s.netmask), "dev", name).Run()
 	logPanicIfErr("failed to set IP", err)
 	err = exec.Command("ip", "link", "set", name, "up").Run()
 	logPanicIfErr("failed to bring up device", err)
-	err = exec.Command("ip", "link", "set", "dev", name, "mtu", strconv.Itoa(mtu)).Run()
+	err = exec.Command("ip", "link", "set", "dev", name, "mtu", strconv.Itoa(s.mtu)).Run()
 	logPanicIfErr("failed to set MTU", err)
 }
 
-func handleReading(proxyConn *net.TCPConn, listenConn net.Conn, proxyConnLock sync.RWMutex, listenConnLock sync.RWMutex) {
-	defer proxyConn.Close()
-	defer listenConn.Close()
-	data := make([]byte, mtu)
+func (s *Server) handleReading(proxyConn *net.TCPConn, listenConn net.Conn) {
+	data := make([]byte, s.mtu)
 	for {
-		proxyConnLock.RLock()
 		n, err := proxyConn.Read(data)
-		proxyConnLock.RUnlock()
 		if err != nil {
 			if err.Error() != "EOF" {
 				debug("error reading from proxy server", err)
 			}
 			return
 		}
-		listenConnLock.Lock()
-		n, err = listenConn.Write(data[:n])
-		listenConnLock.Unlock()
+		_, err = listenConn.Write(data[:n])
 		if err != nil {
 			debug("err writing to client", err)
 			return
@@ -85,37 +85,27 @@ func handleReading(proxyConn *net.TCPConn, listenConn net.Conn, proxyConnLock sy
 	}
 }
 
-func handleConn(listenConn net.Conn) {
+func (s *Server) handleConn(listenConn net.Conn) {
 	defer listenConn.Close()
 	// avoid concurrent rw
-	var listenConnLock sync.RWMutex
-	var proxyConnLock sync.RWMutex
-	srcPort, err := strconv.Atoi(strings.Split(listenConn.RemoteAddr().String(), ":")[1])
-	if err != nil {
-		debug("could not get source port of the incoming connection", err)
-		return
-	}
-	natTableLock.RLock()
-	_, ok := natTable[srcPort]
-	natTableLock.RUnlock()
+	srcPort := strings.Split(listenConn.RemoteAddr().String(), ":")[1]
+	v, ok := s.natTable.Get(srcPort)
 	if !ok {
-		debug(fmt.Sprintf("%d not in nat table", srcPort), nil)
+		debug(fmt.Sprintf("%s not in nat table", srcPort), nil)
 		return
 	}
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", proxyServer)
-	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
-	proxyConn, err := net.DialTCP("tcp", localAddr, remoteAddr)
+	addrs := v.([][]byte)
+	x := addrs[1]
+	y := addrs[2]
+	targetIP := fmt.Sprintf("%d.%d.%d.%d", x[0], x[1], x[2], x[3])
+	targetPort := int(y[0])<<8 + int(y[1])
+	proxyConn, err := net.DialTCP("tcp", nil, s.remoteAddr)
 	if err != nil {
 		debug("failed to connect to proxy server", err)
 		return
 	}
 	defer proxyConn.Close()
-	natTableLock.RLock()
-	x := natTable[srcPort][1]
-	y := natTable[srcPort][2]
-	natTableLock.RUnlock()
-	targetIP := fmt.Sprintf("%d.%d.%d.%d", x[0], x[1], x[2], x[3])
-	targetPort := int(y[0])<<8 + int(y[1])
+
 	connStr := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", targetIP, targetPort, targetIP, targetPort)
 	proxyConn.Write([]byte(connStr))
 	resp := make([]byte, 1024)
@@ -134,21 +124,17 @@ func handleConn(listenConn net.Conn) {
 		debug("failed to connect to proxy server: "+returnCode, nil)
 		return
 	}
-	go handleReading(proxyConn, listenConn, proxyConnLock, listenConnLock)
-	data := make([]byte, mtu)
+	go s.handleReading(proxyConn, listenConn)
+	data := make([]byte, s.mtu)
 	for {
-		listenConnLock.RLock()
 		n, err := listenConn.Read(data)
-		listenConnLock.RUnlock()
 		if err != nil {
 			if err.Error() != "EOF" {
 				debug("error reading from client", err)
 			}
 			return
 		}
-		proxyConnLock.Lock()
 		_, err = proxyConn.Write(data[:n])
-		proxyConnLock.Unlock()
 		if err != nil {
 			debug("error writing to proxy server", err)
 			return
@@ -156,8 +142,8 @@ func handleConn(listenConn net.Conn) {
 	}
 }
 
-func listenServer() {
-	addrStr := fmt.Sprintf("%s:%d", listenIP, listenPort)
+func (s *Server) listenServer() {
+	addrStr := fmt.Sprintf("%s:%d", s.listenIP, s.listenPort)
 	listenAddr, err := net.ResolveTCPAddr("tcp", addrStr)
 	logPanicIfErr("could not parse listen address", err)
 	ln, err := net.ListenTCP("tcp", listenAddr)
@@ -168,16 +154,16 @@ func listenServer() {
 			debug("error reading client request", err)
 			continue
 		}
-		go handleConn(conn)
+		go s.handleConn(conn)
 	}
 }
 
-func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dstPort []byte) {
+func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIP []byte, dstPort []byte) {
 	newAddrChksum, newPortChksum, oldAddrChksum, oldPortChksum := 0, 0, 0, 0
 	newAddrChksum += int(srcIP[0])<<8 + int(srcIP[1])
 	newAddrChksum += int(srcIP[2])<<8 + int(srcIP[3])
-	newAddrChksum += int(dstIp[0])<<8 + int(dstIp[1])
-	newAddrChksum += int(dstIp[2])<<8 + int(dstIp[3])
+	newAddrChksum += int(dstIP[0])<<8 + int(dstIP[1])
+	newAddrChksum += int(dstIP[2])<<8 + int(dstIP[3])
 	newPortChksum += int(srcPort[0])<<8 + int(srcPort[1])
 	newPortChksum += int(dstPort[0])<<8 + int(dstPort[1])
 	for i := 12; i < 20; i += 2 {
@@ -210,12 +196,12 @@ func manglePacket(packet []byte, srcIP []byte, srcPort []byte, dstIp []byte, dst
 	binary.BigEndian.PutUint16(packet[10:12], uint16(newIPChksum))
 	binary.BigEndian.PutUint16(packet[36:38], uint16(newTCPChksum))
 	copy(packet[12:16], srcIP)
-	copy(packet[16:20], dstIp)
+	copy(packet[16:20], dstIP)
 	copy(packet[20:22], srcPort)
 	copy(packet[22:24], dstPort)
 }
 
-func handlePacket(iface *water.Interface, packet []byte) {
+func (s *Server) handlePacket(iface *water.Interface, packet []byte) {
 	if packet[9] != 6 {
 		return
 	}
@@ -227,21 +213,20 @@ func handlePacket(iface *water.Interface, packet []byte) {
 	copy(dstPort, packet[22:24])
 	copy(srcIP, packet[12:16])
 	copy(dstIP, packet[16:20])
-	if bytes.Equal(srcIP, byteListenIP) && bytes.Equal(srcPort, byteListenPort) {
-		key := int(dstPort[0])<<8 + int(dstPort[1])
-		natTableLock.RLock()
-		addrs, ok := natTable[key]
-		natTableLock.RUnlock()
+	if bytes.Equal(srcIP, s.byteListenIP) && bytes.Equal(srcPort, s.byteListenPort) {
+		key := strconv.Itoa(int(dstPort[0])<<8 + int(dstPort[1]))
+		// natTableLock.RLock()
+		v, ok := s.natTable.Get(key)
+		// natTableLock.RUnlock()
 		if !ok {
 			return
 		}
+		addrs := v.([][]byte)
 		manglePacket(packet, addrs[1], addrs[2], addrs[0], dstPort)
 	} else {
-		key := int(srcPort[0])<<8 + int(srcPort[1])
-		natTableLock.Lock()
-		natTable[key] = [][]byte{srcIP, dstIP, dstPort}
-		natTableLock.Unlock()
-		manglePacket(packet, byteFakeSrcIP, srcPort, byteListenIP, byteListenPort)
+		key := strconv.Itoa(int(srcPort[0])<<8 + int(srcPort[1]))
+		s.natTable.Set(key, [][]byte{srcIP, dstIP, dstPort})
+		manglePacket(packet, s.byteFakeSrcIP, srcPort, s.byteListenIP, s.byteListenPort)
 	}
 	iface.Write(packet)
 }
@@ -256,17 +241,39 @@ func main() {
 		os.Exit(1)
 	}
 
+	remoteAddr, err := net.ResolveTCPAddr("tcp", proxyServer)
+	if err != nil {
+		logPanicIfErr("unable resolve tcp addr", err)
+	}
+
+	s := Server{
+		targetUser:      "nobody",
+		tunIP:           "10.45.39.1",
+		fakeSrcIP:       "10.45.39.3",
+		netmask:         24,
+		mtu:             1500,
+		listenIP:        "10.45.39.1",
+		listenPort:      39999,
+		byteListenIP:    []byte{0x0a, 0x2d, 0x27, 0x1},
+		byteFakeSrcIP:   []byte{0x0a, 0x2d, 0x27, 0x3},
+		byteListenPort:  []byte{0x9c, 0x3f},
+		natTable:        cmap.New(),
+		enableDebug:     enableDebug,
+		remoteAddr:      remoteAddr,
+		proxyServerAddr: proxyServer,
+	}
+
 	iface, err := water.NewTUN("")
 	logPanicIfErr("failed to create TUN device", err)
-	setupTun(iface.Name())
-	go listenServer()
+	s.setupTun(iface.Name())
+	go s.listenServer()
 
-	buffer := make([]byte, mtu)
+	buffer := make([]byte, s.mtu)
 	for {
 		n, err := iface.Read(buffer)
 		if err != nil {
-			log.Panic("%s: %s\n", "error reading from TUN", err)
+			log.Panicf("%s: %s\n", "error reading from TUN", err)
 		}
-		handlePacket(iface, buffer[:n])
+		s.handlePacket(iface, buffer[:n])
 	}
 }
