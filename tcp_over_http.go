@@ -10,18 +10,17 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
-	"os/user"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/songgao/water"
-	"github.com/streamrail/concurrent-map"
 )
 
 var (
-	proxyServer = "127.0.0.1:8123"
+	proxyServer = "127.0.0.1:7070"
+	deviceName  = ""
 	enableDebug = false
 )
 
@@ -39,7 +38,7 @@ type Server struct {
 	byteListenPort  []byte
 	proxyServerAddr string
 	remoteAddr      *net.TCPAddr
-	natTable        cmap.ConcurrentMap
+	natTable        sync.Map
 	enableDebug     bool
 }
 
@@ -91,7 +90,7 @@ func (s *Server) handleConn(listenConn net.Conn) {
 	defer listenConn.Close()
 	// avoid concurrent rw
 	srcPort := strings.Split(listenConn.RemoteAddr().String(), ":")[1]
-	v, ok := s.natTable.Get(srcPort)
+	v, ok := s.natTable.Load(srcPort)
 	if !ok {
 		debug(fmt.Sprintf("%s not in nat table", srcPort), nil)
 		return
@@ -225,9 +224,7 @@ func (s *Server) handlePacket(iface *water.Interface, packet []byte) {
 	copy(dstIP, packet[16:20])
 	if bytes.Equal(srcIP, s.byteListenIP) && bytes.Equal(srcPort, s.byteListenPort) {
 		key := strconv.Itoa(int(dstPort[0])<<8 + int(dstPort[1]))
-		// natTableLock.RLock()
-		v, ok := s.natTable.Get(key)
-		// natTableLock.RUnlock()
+		v, ok := s.natTable.Load(key)
 		if !ok {
 			return
 		}
@@ -235,21 +232,17 @@ func (s *Server) handlePacket(iface *water.Interface, packet []byte) {
 		manglePacket(packet, addrs[1], addrs[2], addrs[0], dstPort)
 	} else {
 		key := strconv.Itoa(int(srcPort[0])<<8 + int(srcPort[1]))
-		s.natTable.Set(key, [][]byte{srcIP, dstIP, dstPort})
+		s.natTable.Store(key, [][]byte{srcIP, dstIP, dstPort})
 		manglePacket(packet, s.byteFakeSrcIP, srcPort, s.byteListenIP, s.byteListenPort)
 	}
 	iface.Write(packet)
 }
 
 func main() {
-	flag.StringVar(&proxyServer, "x", "127.0.0.1:8123", "address:port of proxy server, default to")
+	flag.StringVar(&proxyServer, "x", "127.0.0.1:7070", "address:port of proxy server, default to")
+	flag.StringVar(&deviceName, "n", "", "tun device name")
 	flag.BoolVar(&enableDebug, "debug", false, "enable debug outputing")
 	flag.Parse()
-	currUser, _ := user.Current()
-	if currUser.Uid != "0" {
-		fmt.Println("please run this script as root")
-		os.Exit(1)
-	}
 
 	remoteAddr, err := net.ResolveTCPAddr("tcp", proxyServer)
 	if err != nil {
@@ -267,17 +260,18 @@ func main() {
 		byteListenIP:    []byte{0x0a, 0x2d, 0x27, 0x1},
 		byteFakeSrcIP:   []byte{0x0a, 0x2d, 0x27, 0x3},
 		byteListenPort:  []byte{0x9c, 0x3f},
-		natTable:        cmap.New(),
+		natTable:        sync.Map{},
 		enableDebug:     enableDebug,
 		remoteAddr:      remoteAddr,
 		proxyServerAddr: proxyServer,
 	}
 
-	iface, err := water.NewTUN("")
+	iface, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: water.PlatformSpecificParams{Name: deviceName}})
 	logPanicIfErr("failed to create TUN device", err)
 	s.setupTun(iface.Name())
 	go s.listenServer()
 
+	fmt.Println("tcp_over_http started")
 	buffer := make([]byte, s.mtu)
 	for {
 		n, err := iface.Read(buffer)
