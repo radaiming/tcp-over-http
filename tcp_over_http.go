@@ -1,16 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -106,22 +108,30 @@ func (s *Server) handleConn(listenConn net.Conn) {
 	}
 	defer proxyConn.Close()
 
-	connStr := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", targetIP, targetPort, targetIP, targetPort)
-	proxyConn.Write([]byte(connStr))
-	resp := make([]byte, 1024)
-	n, err := proxyConn.Read(resp)
+	req := &http.Request{
+		Method:     http.MethodConnect,
+		URL:        &url.URL{},
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Body:       nil,
+		Header:     make(http.Header),
+		Host:       fmt.Sprintf("%s:%d", targetIP, targetPort),
+	}
+	err = req.WriteProxy(proxyConn)
 	if err != nil {
-		debug("error reading from proxy server", err)
+		debug("error writing proxy server", err)
 		return
 	}
-	reg := regexp.MustCompile(`HTTP/\d\.\d\s+?(\d+?)\s+?`)
-	ret := reg.FindSubmatch(resp[:n])
-	returnCode := "unknown"
-	if ret != nil {
-		returnCode = string(ret[1])
+	resp, err := http.ReadResponse(bufio.NewReader(proxyConn), nil)
+	if err != nil {
+		debug("error reading proxy server", err)
+		return
 	}
-	if returnCode != "200" {
-		debug("failed to connect to proxy server: "+returnCode, nil)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		debug(fmt.Sprintf("failed to connect to proxy server: %d", resp.StatusCode), nil)
 		return
 	}
 	go s.handleReading(proxyConn, listenConn)
